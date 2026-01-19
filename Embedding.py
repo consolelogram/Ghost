@@ -1,6 +1,5 @@
 import json
 import numpy as np
-from tqdm import tqdm
 from sentence_transformers import SentenceTransformer
 
 # ---------- CONFIG ----------
@@ -42,7 +41,7 @@ def main():
 
     print(f"Saved {len(embedded_blocks)} embedded blocks to {OUTPUT_FILE}")
 
-    # ---- sanity checks ----
+    # Checks
     dims = set(len(b["vector"]) for b in embedded_blocks)
     print("Embedding dimensions:", dims)
 
