@@ -1,15 +1,26 @@
-import redis
+import json
 import numpy as np
+import faiss
 import requests
 from sentence_transformers import SentenceTransformer
 
+# ---------- CONFIG ----------
+FAISS_INDEX_FILE = "ghost.index"
+TEXT_STORE_FILE = "ghost_texts.json"
+TOP_K = 30
+# ----------------------------
+
 # -------- setup --------
-r = redis.Redis(host="127.0.0.1", port=6379, decode_responses=False)
+index = faiss.read_index(FAISS_INDEX_FILE)
+
+with open(TEXT_STORE_FILE, "r", encoding="utf-8") as f:
+    raw = json.load(f)
+    # JSON keys are always strings, convert back to int
+    texts = {int(k): v for k, v in raw.items()}
+
 embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 def energy_score(text):
-    if isinstance(text, bytes):
-        text = text.decode("utf-8")
     return (
         len(text.split())
         + text.count("!") * 2
@@ -35,7 +46,7 @@ def call_llm(prompt):
     except Exception as e:
         return f"[LLM Error: {e}]"
 
-print("Ghost (Redis-backed) is awake. Empty input to exit.\n")
+print("Watashi wa Ghost. Ghost wa okiteiru. Empty input to exit.\n")
 
 # -------- chat loop --------
 while True:
@@ -44,41 +55,24 @@ while True:
         break
 
     q_energy = energy_score(query)
-    q_vec_np = embed_model.encode(query)
-    q_vec_bytes = q_vec_np.astype(np.float32).tobytes()
 
-    # ---- Redis retrieval ----
-    try:
-        # We ask for the vector_score. 
-        # Note: Even with DIALECT 2, we will parse as a flat list to be safe.
-        res = r.execute_command(
-            "FT.SEARCH", "ghost_idx",
-            "*=>[KNN 30 @embedding $vec AS vector_score]",
-            "PARAMS", 2, "vec", q_vec_bytes,
-            "RETURN", 2, "text", "vector_score",
-            "DIALECT", 2
-        )
-    except redis.exceptions.ResponseError as e:
-        print(f"Redis Error: {e}")
-        continue
+    # Embed and normalize query
+    q_vec = embed_model.encode(query).astype(np.float32)
+    q_vec /= np.linalg.norm(q_vec) + 1e-10
+    q_vec = q_vec.reshape(1, -1)
 
-    # ---- parse Redis results (Fixed for Flat List) ----
+    # ---- FAISS retrieval ----
+    scores, indices = index.search(q_vec, TOP_K)
+
+    # FAISS IndexFlatIP returns cosine similarity (higher = better)
+    # Convert to distance (lower = better) to keep the same logic as before
     scored = []
-    
-    # res structure: [total_count, key1, [fields1], key2, [fields2], ...]
-    # We iterate starting at index 1, stepping by 2 to hit the keys
-    for i in range(1, len(res), 2):
-        # res[i] is the key (we ignore it)
-        payload = res[i+1] # This is the list of fields: [b'text', b'...', b'vector_score', b'0.123']
-        
-        # Convert the fields list into a dictionary
-        data = {payload[j]: payload[j+1] for j in range(0, len(payload), 2)}
-        
-        text_content = data.get(b"text", b"").decode("utf-8")
-        # Redis returns distance as a string, need to cast to float
-        dist = float(data.get(b"vector_score", 1.0))
-        
-        scored.append((dist, text_content))
+    for score, idx in zip(scores[0], indices[0]):
+        if idx == -1:
+            continue
+        dist = 1.0 - float(score)  # cosine distance
+        text = texts.get(idx, "")
+        scored.append((dist, text))
 
     # ---- energy filter ----
     filtered = [
@@ -88,14 +82,12 @@ while True:
     if not filtered:
         filtered = scored
 
-# ---- selector ----
-    # Sort ASCENDING (Low distance = Better match)
-    filtered.sort(key=lambda x: x[0], reverse=False)
+    # ---- selector ----
+    # Sort ASCENDING (low distance = better match)
+    filtered.sort(key=lambda x: x[0])
 
     best_dist = filtered[0][0]
-    
-    # [ADDED] Absolute Threshold Check
-    # If the closest match is still "far away" (distance > 0.5), ignore it.
+
     if best_dist > 0.8:
         print(f"Ghost: ... (No relevant memories found, closest dist: {best_dist:.2f})")
         continue
