@@ -1,51 +1,97 @@
-# Ghost: Style-Matching RAG System
+# Ghost
 
-**Ghost** is a Retrieval-Augmented Generation (RAG) engine designed for personality cloning and style transfer. Unlike traditional RAG systems that prioritize factual retrieval, Ghost optimizes for "vibe consistency" by retrieving historical messages based on semantic meaning and emotional intensity ("energy").
+Ghost is a local AI that replies the way you do — it retrieves messages from your own chat history and rewrites them as contextual replies using an LLM.
 
-The system indexes a user's chat history, performs high-dimensional vector search to find contextually appropriate past responses, and uses a local Large Language Model (Phi-3) to rewrite those responses to fit new conversational contexts.
+---
 
-## System Architecture
+## How it works
 
-The pipeline consists of four distinct stages: Vectorization, Indexing, Retrieval, and Generation.
+1. Your messages are chunked into blocks and embedded using `all-MiniLM-L6-v2`
+2. Embeddings are stored in a local FAISS index
+3. At query time, Ghost retrieves the closest matching blocks by cosine similarity
+4. An energy score filter narrows results by linguistic style
+5. An LLM rewrites the best match as a reply to what you just said
 
-### 1. Vectorization & Embedding
+---
 
-* **Model:** `all-MiniLM-L6-v2` (SentenceTransformer)
-* **Dimensions:** 384
-* **Process:** Raw text blocks are converted into dense vector embeddings. This maps semantic concepts to coordinates in a 384-dimensional space, allowing the system to understand that "Hello" and "Hi" are mathematically close, while "Hello" and "Apple" are distant.
+## Setup
 
-### 2. High-Performance Indexing (Redis)
+### 1. Install dependencies
 
-* **Engine:** Redis Stack (RediSearch module)
-* **Algorithm:** Hierarchical Navigable Small World (HNSW)
-* **Metric:** Cosine Similarity
-* **Structure:** Data is stored as Redis Hashes containing both the raw text payload and the binary vector blob.
-* **Configuration:** The HNSW graph is configured with `M=6` (edges per node), optimizing for low memory usage and fast insertion speeds at the cost of slight recall degradation.
+```bash
+pip install -r requirements.txt
+```
 
-### 3. Heuristic Retrieval Strategy
+### 2. Configure your API key
 
-The search process is not purely semantic. It employs a two-layer filtering mechanism to ensure the "tone" matches the user's input.
+Copy `.env` and fill in your Groq key:
 
-* **Layer 1: Vector Search (KNN)**
-The system queries the Redis HNSW index to find the 30 "Nearest Neighbors" (K=30) to the user's input vector. This filters the database down to messages that are *semantically* relevant.
-* **Layer 2: Energy Filtering**
-A custom "Energy Score" is calculated for the input query and the retrieved candidates.
-* *Formula:* `Score = Length + (Exclamations * 2) + QuestionMarks + UppercaseCount`
-* *Logic:* Candidates with an energy score deviation > 10 are discarded. This prevents the system from responding to a calm "hello" with a high-intensity, angry paragraph, even if the semantic meaning is similar.
+```
+GROQ_API_KEY=your_groq_api_key_here
+```
 
+Get one free at [console.groq.com](https://console.groq.com)
 
-* **Layer 3: Re-Ranking**
-The remaining candidates are re-scored using a precise Dot Product calculation in Python to identify the single best "Anchor" message.
+---
 
-### 4. Generative Style Transfer
+## Usage
 
-* **Model:** Microsoft Phi-3 (via Ollama)
-* **Prompt Strategy:** The system does not ask the LLM to answer the user's question directly. Instead, it provides the "Anchor" message (the historical reply) and instructs the LLM to rewrite it.
-* **Goal:** This forces the LLM to adopt the syntax, slang, and sentence structure of the original user, effectively functioning as a style-transfer engine rather than a chatbot.
+Run the pipeline once to build the index:
 
-## Repository Structure
+```bash
+python Embedding.py        # embed blocks.json → embedded_blocks.json
+python load_to_faiss.py    # build FAISS index → ghost.index + ghost_texts.json
+```
 
-* **`Embedding.py`**: Batch processor that loads `blocks.json`, computes embeddings using the CPU/GPU, and saves the output as a JSON object containing text/vector pairs.
-* **`redis_index.py`**: Database schema definition. Executes `FT.CREATE` to initialize the vector search index with specific schema constraints (Float32 type, 384 dimensions).
-* **`load_to_redis.py`**: Ingestion script. Converts standard Python lists into C-compatible binary blobs (`numpy.tobytes()`) and pipelines them into Redis memory.
-* **`test_search.py`**: The runtime application. Handles the chat loop, computes real-time energy scores, executes the `FT.SEARCH` command, and manages the API calls to the local LLM inference server.
+Then start Ghost:
+
+```bash
+python test_search_groq.py
+```
+
+Empty input exits.
+
+---
+
+## Files
+
+| File | Purpose |
+|------|---------|
+| `blocks.json` | Raw text blocks (your messages) |
+| `Embedding.py` | Embeds blocks using sentence-transformers |
+| `load_to_faiss.py` | Builds and saves the FAISS index |
+| `test_search_groq.py` | Main chat loop (Groq) |
+| `test_search.py` | Alternate chat loop (local Ollama) |
+| `ghost.index` | FAISS vector index (generated) |
+| `ghost_texts.json` | ID → text lookup (generated) |
+| `.env` | API keys |
+
+---
+
+## Config
+
+At the top of `test_search_groq.py`:
+
+```python
+GROQ_MODEL = "llama3-8b-8192"   # swap to llama3-70b-8192 for better quality
+TOP_K = 30                        # number of candidates to retrieve
+```
+
+---
+
+## Local LLM (no API)
+
+If you'd rather run fully offline with Ollama:
+
+```bash
+# install ollama from ollama.com, then:
+ollama pull phi3:mini
+python test_search.py
+```
+
+---
+
+## Requirements
+
+- Python 3.9+
+- `faiss-cpu`, `sentence-transformers`, `requests`, `numpy`, `python-dotenv`
