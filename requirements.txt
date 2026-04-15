@@ -1,0 +1,5 @@
+numpy
+faiss-cpu
+requests
+sentence-transformers
+python-dotenv
